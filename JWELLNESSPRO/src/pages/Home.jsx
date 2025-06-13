@@ -3,7 +3,7 @@ import { motion } from 'framer-motion';
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/use-toast";
 import { supabase } from '@/lib/supabase';
-import { LogOut, BrainCircuit, Upload, Watch, Activity, FileJson, MessageSquare, AlertTriangle, ExternalLink, CheckCircle } from 'lucide-react';
+import { LogOut, BrainCircuit, Upload, Watch, Activity, FileJson, MessageSquare, AlertTriangle, ExternalLink, CheckCircle, BarChart3, HeartPulse, Moon } from 'lucide-react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import FileUpload from '@/components/FileUpload';
 import DynamicUIComponent from '@/components/DynamicUIComponent';
@@ -34,9 +34,9 @@ const initialAIResponse = {
     {
       type: 'buttonGroup',
       buttons: [
-        { label: 'Analizza i miei ultimi pasti', action: 'analyze_meals', payload: { period: 'last_week' } },
-        { label: 'Suggerisci un allenamento', action: 'suggest_workout', payload: { type: 'cardio' } },
-        { label: 'Mostra progressi InBody', action: 'show_inbody_progress' },
+        { label: 'Analizza i miei ultimi pasti', action: 'analyze_meals_actual', payload: { period: 'last_week' } },
+        { label: 'Suggerisci un allenamento', action: 'suggest_workout_actual', payload: { type: 'cardio' } },
+        { label: 'Mostra progressi InBody', action: 'show_inbody_progress_actual' },
       ],
     },
   ],
@@ -50,6 +50,28 @@ const Home = ({ session }) => {
   const [isLoadingAI, setIsLoadingAI] = useState(false);
   const [isOpenAIConfigured, setIsOpenAIConfigured] = useState(false);
   const [isCheckingConfig, setIsCheckingConfig] = useState(true);
+  const [userBiometricData, setUserBiometricData] = useState([]);
+
+  const fetchUserBiometricData = useCallback(async () => {
+    if (!session || !session.user) return;
+    try {
+      const { data, error } = await supabase
+        .from('user_biometric_data')
+        .select('data_type, value, unit, source, recorded_at')
+        .eq('user_id', session.user.id)
+        .order('recorded_at', { ascending: false })
+        .limit(20);
+      if (error) throw error;
+      setUserBiometricData(data || []);
+    } catch (error) {
+      console.error("Errore nel recuperare i dati biometrici:", error);
+      toast({ title: "Errore Dati Biometrici", description: "Impossibile caricare i dati biometrici.", variant: "destructive" });
+    }
+  }, [session, toast]);
+
+  useEffect(() => {
+    fetchUserBiometricData();
+  }, [fetchUserBiometricData]);
 
 
   const checkOpenAIConfig = useCallback(async (showToastNotification = false) => {
@@ -126,7 +148,7 @@ const Home = ({ session }) => {
     try {
       const { data: filesData, error: filesError } = await supabase
         .from('user_files')
-        .select('file_name, file_type, created_at')
+        .select('file_name, file_type, created_at, file_path')
         .eq('user_id', session.user.id)
         .order('created_at', { ascending: false })
         .limit(10);
@@ -140,7 +162,7 @@ const Home = ({ session }) => {
           action, 
           payload, 
           userFiles: filesData || [],
-          userBiometricData: {} 
+          userId: session.user.id,
         }),
       });
 
@@ -180,6 +202,32 @@ const Home = ({ session }) => {
       setShowFileUpload(true);
       setCurrentUISchema(initialAIResponse);
       setIsLoadingAI(false);
+      fetchUserBiometricData(); 
+      return;
+    }
+    if (action === 'sync_wearable_data_placeholder') {
+      // Simula l'aggiunta di dati biometrici e poi chiama l'AI
+      const simulateAndFetch = async () => {
+        const simulatedData = [
+          { data_type: 'steps', value: Math.floor(Math.random() * 5000 + 5000).toString(), unit: 'steps', source: payload.wearable, recorded_at: new Date().toISOString() },
+          { data_type: 'sleep_duration', value: (Math.random() * 3 + 5).toFixed(1).toString(), unit: 'hours', source: payload.wearable, recorded_at: new Date().toISOString() },
+          { data_type: 'heart_rate_avg', value: Math.floor(Math.random() * 20 + 60).toString(), unit: 'bpm', source: payload.wearable, recorded_at: new Date().toISOString() },
+        ];
+        
+        const { error: insertError } = await supabase.from('user_biometric_data').insert(
+          simulatedData.map(d => ({ ...d, user_id: session.user.id }))
+        );
+
+        if (insertError) {
+          console.error("Errore inserimento dati biometrici simulati:", insertError);
+          toast({ title: "Errore Simulazione", description: "Impossibile salvare dati biometrici simulati.", variant: "destructive"});
+        } else {
+          toast({ title: "Dati Simulati Aggiunti!", description: `Nuovi dati da ${payload.wearable} sono stati simulati.`});
+          await fetchUserBiometricData(); // Aggiorna i dati biometrici locali
+        }
+        fetchAIResponse(action, payload); // Chiama l'AI con l'azione originale
+      };
+      simulateAndFetch();
       return;
     }
     fetchAIResponse(action, payload);
@@ -191,7 +239,7 @@ const Home = ({ session }) => {
   };
 
   useEffect(() => {
-    const channel = supabase.channel('user_files_changes')
+    const fileChannel = supabase.channel('user_files_changes')
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'user_files' }, (payloadEntry) => {
         if(payloadEntry.new.user_id === session.user.id){
             toast({ title: 'Nuovo file caricato!', description: `${payloadEntry.new.file_name} pronto per l'analisi.`});
@@ -204,31 +252,27 @@ const Home = ({ session }) => {
         }
       })
       .subscribe();
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [session.user.id, toast, fetchAIResponse, isOpenAIConfigured]);
+    
+    const biometricChannel = supabase.channel('user_biometric_data_changes')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'user_biometric_data' }, (payload) => {
+        if (payload.new?.user_id === session.user.id || payload.old?.user_id === session.user.id) {
+          fetchUserBiometricData();
+        }
+      })
+      .subscribe();
 
-  const wearableIntegrationInfo = (wearableName) => {
-    toast({
-      title: `Collegamento ${wearableName} (Info)`,
-      description: (
-        <div>
-          <p className="mb-2">L'integrazione diretta con {wearableName} richiede passaggi specifici:</p>
-          <ul className="list-disc list-inside text-sm space-y-1 mb-3">
-            <li>Registrazione dell'app sulla piattaforma sviluppatori di {wearableName}.</li>
-            <li>Ottenimento di credenziali API (Client ID, Secret).</li>
-            <li>Implementazione del flusso di autenticazione OAuth2.</li>
-          </ul>
-          <p className="text-xs">Questa è una funzionalità avanzata. Per ora, questa è una simulazione.</p>
-          <Button size="sm" className="mt-3 w-full" onClick={() => window.open(`https://developer.${wearableName.toLowerCase().replace(/\s+/g, '').replace('watch', 'apple')}.com`, '_blank')}>
-            Vai alla Developer Console di {wearableName} <ExternalLink className="ml-2 h-4 w-4"/>
-          </Button>
-        </div>
-      ),
-      duration: 20000,
-    });
+    return () => {
+      supabase.removeChannel(fileChannel);
+      supabase.removeChannel(biometricChannel);
+    };
+  }, [session.user.id, toast, fetchAIResponse, isOpenAIConfigured, fetchUserBiometricData]);
+
+  const wearableIntegrationAction = (wearableName) => {
      handleAIAction('connect_wearable_placeholder', { wearable: wearableName });
+  };
+
+  const syncWearableDataAction = (wearableName) => {
+    handleAIAction('sync_wearable_data_placeholder', { wearable: wearableName });
   };
 
 
@@ -329,20 +373,41 @@ const Home = ({ session }) => {
 
               <Card className="bg-white/80 backdrop-blur-sm shadow-xl">
                 <CardHeader>
-                  <CardTitle className="flex items-center gap-2"><Watch className="h-6 w-6 text-teal-500"/>Collega Dispositivi Wearable</CardTitle>
-                  <CardDescription>Sincronizza il tuo smartwatch per dati biometrici in tempo reale (integrazione simulata).</CardDescription>
+                  <CardTitle className="flex items-center gap-2"><Watch className="h-6 w-6 text-teal-500"/>Dati Biometrici e Wearable</CardTitle>
+                  <CardDescription>Collega il tuo smartwatch o visualizza i dati sincronizzati (integrazione simulata per ora).</CardDescription>
                 </CardHeader>
-                <CardContent className="flex flex-col items-center space-y-3">
-                  <img  alt="Illustrazione di vari smartwatch e fitness tracker connessi" className="w-40 h-32 mb-2 object-contain" src="https://images.unsplash.com/photo-1553545204-4f7d339aa06a" />
-                  <p className="text-center text-gray-600">Seleziona il tuo dispositivo per iniziare il processo di collegamento (simulato).</p>
-                  <div className="grid grid-cols-2 gap-3 w-full max-w-sm">
-                    <Button onClick={() => wearableIntegrationInfo('Apple Watch')} className="bg-gray-800 hover:bg-gray-900 text-white w-full">Apple Watch</Button>
-                    <Button onClick={() => wearableIntegrationInfo('Garmin')} className="bg-blue-700 hover:bg-blue-800 text-white w-full">Garmin</Button>
-                    <Button onClick={() => wearableIntegrationInfo('Fitbit')} className="bg-teal-500 hover:bg-teal-600 text-white w-full">Fitbit</Button>
-                    <Button onClick={() => wearableIntegrationInfo('Altro Dispositivo')} className="bg-gray-500 hover:bg-gray-600 text-white w-full">Altro</Button>
+                <CardContent className="space-y-4">
+                  <img  alt="Illustrazione di vari smartwatch e fitness tracker connessi" className="w-full h-40 mb-2 object-contain rounded-lg shadow-inner bg-slate-100 p-2" src="https://images.unsplash.com/photo-1702500461144-db32f73ecd18" />
+                  <p className="text-center text-gray-600 text-sm">
+                    L'integrazione reale con i wearable è in sviluppo. Per ora, puoi simulare la connessione e la sincronizzazione dei dati.
+                  </p>
+                  <div className="grid grid-cols-2 gap-3">
+                    <Button onClick={() => wearableIntegrationAction('Apple Watch')} className="bg-gray-800 hover:bg-gray-900 text-white w-full">Collega Apple Watch</Button>
+                    <Button onClick={() => wearableIntegrationAction('Garmin')} className="bg-blue-700 hover:bg-blue-800 text-white w-full">Collega Garmin</Button>
+                    <Button onClick={() => wearableIntegrationAction('Fitbit')} className="bg-teal-500 hover:bg-teal-600 text-white w-full">Collega Fitbit</Button>
+                    <Button onClick={() => wearableIntegrationAction('Altro Dispositivo')} className="bg-gray-500 hover:bg-gray-600 text-white w-full">Collega Altro</Button>
                   </div>
+                  <Button onClick={() => syncWearableDataAction('Wearable Sim')} variant="outline" className="w-full border-dashed border-sky-500 text-sky-600 hover:bg-sky-50">
+                    Simula Sincronizzazione Dati Wearable
+                  </Button>
+                  {userBiometricData.length > 0 && (
+                    <div className="pt-4">
+                      <h3 className="text-md font-semibold mb-2 text-gray-700">Ultimi Dati Biometrici (Simulati):</h3>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 text-xs">
+                        {userBiometricData.slice(0,3).map(data => (
+                          <div key={data.recorded_at + data.data_type} className="p-2 border rounded-md bg-slate-50">
+                            <span className="font-medium capitalize text-slate-700">{data.data_type.replace('_', ' ')}: </span>
+                            <span className="text-slate-600">{data.value} {data.unit}</span>
+                            <span className="block text-slate-400 text-[10px]">({data.source} - {new Date(data.recorded_at).toLocaleTimeString()})</span>
+                          </div>
+                        ))}
+                      </div>
+                       {userBiometricData.length > 3 && <p className="text-xs text-center mt-2 text-gray-500">E altri {userBiometricData.length -3} record...</p>}
+                    </div>
+                  )}
                 </CardContent>
               </Card>
+
                <Card className="bg-white/80 backdrop-blur-sm shadow-xl">
                 <CardHeader>
                   <CardTitle className="flex items-center gap-2"><MessageSquare className="h-6 w-6 text-purple-500"/>Interazione Diretta con l'AI</CardTitle>
