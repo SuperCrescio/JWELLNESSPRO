@@ -1,8 +1,10 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { motion } from 'framer-motion';
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { useToast } from "@/components/ui/use-toast";
 import { supabase } from '@/lib/supabase';
+import { getAIUIResponse } from '@/lib/openaiClient';
 import { LogOut, BrainCircuit, Upload, Watch, Activity, FileJson, MessageSquare, AlertTriangle, ExternalLink, CheckCircle, BarChart3, HeartPulse, Moon } from 'lucide-react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import FileUpload from '@/components/FileUpload';
@@ -51,6 +53,8 @@ const Home = ({ session }) => {
   const [isOpenAIConfigured, setIsOpenAIConfigured] = useState(false);
   const [isCheckingConfig, setIsCheckingConfig] = useState(true);
   const [userBiometricData, setUserBiometricData] = useState([]);
+  const [openAIKey, setOpenAIKey] = useState(() => localStorage.getItem('openaiApiKey') || '');
+  const [connectedDevice, setConnectedDevice] = useState(null);
 
   const fetchUserBiometricData = useCallback(async () => {
     if (!session || !session.user) return;
@@ -74,45 +78,32 @@ const Home = ({ session }) => {
   }, [fetchUserBiometricData]);
 
 
-  const checkOpenAIConfig = useCallback(async (showToastNotification = false) => {
+  const checkOpenAIConfig = useCallback((showToastNotification = false) => {
     setIsCheckingConfig(true);
-    try {
-      const { data, error } = await supabase.functions.invoke('check-openai-secret');
-      if (error) throw error;
-      if (data && data.isConfigured) {
-        setIsOpenAIConfigured(true);
-        if (showToastNotification) {
-          toast({
-            title: 'OpenAI Configurato Correttamente!',
-            description: "Le funzionalità AI sono ora attive.",
-            variant: 'default',
-            action: <CheckCircle className="h-5 w-5 text-green-500" />
-          });
-        }
-      } else {
-         setIsOpenAIConfigured(false);
-         if (showToastNotification) {
-            toast({
-              title: 'Configurazione OpenAI Mancante',
-              description: "La chiave API OpenAI non è stata ancora impostata. Le funzionalità AI non saranno disponibili.",
-              variant: 'destructive',
-              duration: 10000,
-            });
-          }
-      }
-    } catch (error) {
-      setIsOpenAIConfigured(false);
-      console.error("Error checking OpenAI config:", error);
+    const key = localStorage.getItem('openaiApiKey') || '';
+    if (key) {
+      setIsOpenAIConfigured(true);
+      setOpenAIKey(key);
       if (showToastNotification) {
         toast({
-          title: 'Errore Controllo Configurazione AI',
-          description: "Impossibile verificare la configurazione della chiave API OpenAI.",
-          variant: 'destructive',
+          title: 'OpenAI Configurato Correttamente!',
+          description: "Le funzionalità AI sono ora attive.",
+          variant: 'default',
+          action: <CheckCircle className="h-5 w-5 text-green-500" />
         });
       }
-    } finally {
-      setIsCheckingConfig(false);
+    } else {
+      setIsOpenAIConfigured(false);
+      if (showToastNotification) {
+        toast({
+          title: 'Configurazione OpenAI Mancante',
+          description: "La chiave API OpenAI non è stata ancora impostata. Le funzionalità AI non saranno disponibili.",
+          variant: 'destructive',
+          duration: 10000,
+        });
+      }
     }
+    setIsCheckingConfig(false);
   }, [toast]);
 
   useEffect(() => {
@@ -132,10 +123,10 @@ const Home = ({ session }) => {
   };
 
   const fetchAIResponse = useCallback(async (action, payload) => {
-    if (!isOpenAIConfigured) {
+    if (!isOpenAIConfigured || !openAIKey) {
       toast({
         title: 'Funzionalità AI non disponibile',
-        description: 'La chiave API OpenAI non è configurata. Per favore, chiedi all\'assistente di configurarla.',
+        description: 'La chiave API OpenAI non è configurata. Forniscila per continuare.',
         variant: 'destructive',
       });
       return;
@@ -154,31 +145,20 @@ const Home = ({ session }) => {
         .limit(10);
 
       if (filesError) {
-        console.error("Errore nel recuperare i file utente:", filesError);
+        console.error('Errore nel recuperare i file utente:', filesError);
       }
-      
-      const { data, error } = await supabase.functions.invoke('get-ai-response', {
-        body: JSON.stringify({ 
-          action, 
-          payload, 
-          userFiles: filesData || [],
-          userId: session.user.id,
-        }),
-      });
 
-      if (error) throw error;
-      
-      if (data && data.uiSchema) {
-        setCurrentUISchema(data.uiSchema);
-      } else if (data && data.error) {
-        throw new Error(`AI Error: ${data.error}`);
-      }
-      else {
-        throw new Error("Risposta AI non valida o mancante di uiSchema.");
-      }
+      const messages = [
+        { role: 'system', content: 'Sei un assistente per il benessere. Rispondi solo con JSON valido per definire una UI react secondo lo schema fornito.' },
+        { role: 'user', content: JSON.stringify({ action, payload, userFiles: filesData || [] }) }
+      ];
+
+      const uiSchema = await getAIUIResponse(openAIKey, messages);
+
+      setCurrentUISchema(uiSchema);
 
     } catch (error) {
-      console.error("Errore durante la chiamata alla Edge Function AI:", error);
+      console.error('Errore durante la chiamata OpenAI:', error);
       toast({
         title: 'Errore AI',
         description: `Si è verificato un errore: ${error.message}. Utilizzo UI di fallback.`,
@@ -194,7 +174,7 @@ const Home = ({ session }) => {
       setIsLoadingAI(false);
     }
 
-  }, [toast, isOpenAIConfigured, session]);
+  }, [toast, isOpenAIConfigured, session, openAIKey]);
 
 
   const handleAIAction = (action, payload) => {
@@ -206,28 +186,8 @@ const Home = ({ session }) => {
       return;
     }
     if (action === 'sync_wearable_data_placeholder') {
-      // Simula l'aggiunta di dati biometrici e poi chiama l'AI
-      const simulateAndFetch = async () => {
-        const simulatedData = [
-          { data_type: 'steps', value: Math.floor(Math.random() * 5000 + 5000).toString(), unit: 'steps', source: payload.wearable, recorded_at: new Date().toISOString() },
-          { data_type: 'sleep_duration', value: (Math.random() * 3 + 5).toFixed(1).toString(), unit: 'hours', source: payload.wearable, recorded_at: new Date().toISOString() },
-          { data_type: 'heart_rate_avg', value: Math.floor(Math.random() * 20 + 60).toString(), unit: 'bpm', source: payload.wearable, recorded_at: new Date().toISOString() },
-        ];
-        
-        const { error: insertError } = await supabase.from('user_biometric_data').insert(
-          simulatedData.map(d => ({ ...d, user_id: session.user.id }))
-        );
-
-        if (insertError) {
-          console.error("Errore inserimento dati biometrici simulati:", insertError);
-          toast({ title: "Errore Simulazione", description: "Impossibile salvare dati biometrici simulati.", variant: "destructive"});
-        } else {
-          toast({ title: "Dati Simulati Aggiunti!", description: `Nuovi dati da ${payload.wearable} sono stati simulati.`});
-          await fetchUserBiometricData(); // Aggiorna i dati biometrici locali
-        }
-        fetchAIResponse(action, payload); // Chiama l'AI con l'azione originale
-      };
-      simulateAndFetch();
+      syncWearableData(payload.wearable);
+      fetchAIResponse(action, payload);
       return;
     }
     fetchAIResponse(action, payload);
@@ -267,12 +227,52 @@ const Home = ({ session }) => {
     };
   }, [session.user.id, toast, fetchAIResponse, isOpenAIConfigured, fetchUserBiometricData]);
 
+  const handleHeartRate = async (event) => {
+    const value = event.target.value;
+    const hr = value.getUint8(1);
+    await supabase.from('user_biometric_data').insert({
+      user_id: session.user.id,
+      data_type: 'heart_rate',
+      value: hr.toString(),
+      unit: 'bpm',
+      source: connectedDevice?.wearable || 'Wearable',
+      recorded_at: new Date().toISOString(),
+    });
+  };
+
+  const connectWearableDevice = async (wearableName) => {
+    if (!navigator.bluetooth) {
+      toast({ title: 'Bluetooth non supportato', description: 'Il browser non supporta Web Bluetooth', variant: 'destructive' });
+      return;
+    }
+    try {
+      const device = await navigator.bluetooth.requestDevice({ filters: [{ services: ['heart_rate'] }] });
+      const server = await device.gatt.connect();
+      const service = await server.getPrimaryService('heart_rate');
+      const char = await service.getCharacteristic('heart_rate_measurement');
+      await char.startNotifications();
+      char.addEventListener('characteristicvaluechanged', handleHeartRate);
+      setConnectedDevice({ device, char, wearable: wearableName });
+      toast({ title: `Connesso a ${wearableName}`, description: device.name || wearableName });
+    } catch (err) {
+      console.error('Errore connessione wearable:', err);
+      toast({ title: 'Errore Wearable', description: err.message, variant: 'destructive' });
+    }
+  };
+
+  const syncWearableData = async (wearableName) => {
+    if (!connectedDevice) {
+      await connectWearableDevice(wearableName);
+    }
+    toast({ title: 'Sincronizzazione avviata', description: `Raccolgo dati da ${wearableName}` });
+  };
+
   const wearableIntegrationAction = (wearableName) => {
-     handleAIAction('connect_wearable_placeholder', { wearable: wearableName });
+    connectWearableDevice(wearableName);
   };
 
   const syncWearableDataAction = (wearableName) => {
-    handleAIAction('sync_wearable_data_placeholder', { wearable: wearableName });
+    syncWearableData(wearableName);
   };
 
 
@@ -300,17 +300,21 @@ const Home = ({ session }) => {
               </AlertDialogTrigger>
               <AlertDialogContent>
                 <AlertDialogHeader>
-                  <AlertDialogTitle>Configurazione OpenAI Mancante</AlertDialogTitle>
+                  <AlertDialogTitle>Configura OpenAI</AlertDialogTitle>
                   <AlertDialogDescription>
-                    Per abilitare le funzionalità di intelligenza artificiale, è necessario fornire una chiave API OpenAI.
-                    Senza questa chiave, l'app funzionerà con funzionalità limitate. Puoi ottenere la tua chiave API dal
-                    sito di OpenAI. Una volta ottenuta, forniscila all'assistente AI per salvarla.
+                    Inserisci la tua chiave API OpenAI per attivare le funzionalità di intelligenza artificiale.
                   </AlertDialogDescription>
                 </AlertDialogHeader>
+                <div className="py-2 space-y-2">
+                  <Input type="password" value={openAIKey} onChange={(e) => setOpenAIKey(e.target.value)} placeholder="sk-..." />
+                  <Button variant="link" className="p-0" onClick={() => window.open('https://platform.openai.com/api-keys', '_blank')}>
+                    Ottieni una chiave API <ExternalLink className="ml-1 h-4 w-4" />
+                  </Button>
+                </div>
                 <AlertDialogFooter>
-                  <AlertDialogCancel>Capito</AlertDialogCancel>
-                  <AlertDialogAction onClick={() => window.open('https://platform.openai.com/api-keys', '_blank')}>
-                    Ottieni Chiave API <ExternalLink className="ml-2 h-4 w-4"/>
+                  <AlertDialogCancel>Annulla</AlertDialogCancel>
+                  <AlertDialogAction onClick={() => { localStorage.setItem('openaiApiKey', openAIKey); checkOpenAIConfig(true); }}>
+                    Salva Chiave
                   </AlertDialogAction>
                 </AlertDialogFooter>
               </AlertDialogContent>
@@ -374,12 +378,12 @@ const Home = ({ session }) => {
               <Card className="bg-white/80 backdrop-blur-sm shadow-xl">
                 <CardHeader>
                   <CardTitle className="flex items-center gap-2"><Watch className="h-6 w-6 text-teal-500"/>Dati Biometrici e Wearable</CardTitle>
-                  <CardDescription>Collega il tuo smartwatch o visualizza i dati sincronizzati (integrazione simulata per ora).</CardDescription>
+                  <CardDescription>Collega il tuo smartwatch e sincronizza i dati biometrici tramite Web Bluetooth.</CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
                   <img  alt="Illustrazione di vari smartwatch e fitness tracker connessi" className="w-full h-40 mb-2 object-contain rounded-lg shadow-inner bg-slate-100 p-2" src="https://images.unsplash.com/photo-1702500461144-db32f73ecd18" />
                   <p className="text-center text-gray-600 text-sm">
-                    L'integrazione reale con i wearable è in sviluppo. Per ora, puoi simulare la connessione e la sincronizzazione dei dati.
+                    Assicurati che il dispositivo sia vicino e con Bluetooth attivo.
                   </p>
                   <div className="grid grid-cols-2 gap-3">
                     <Button onClick={() => wearableIntegrationAction('Apple Watch')} className="bg-gray-800 hover:bg-gray-900 text-white w-full">Collega Apple Watch</Button>
@@ -387,12 +391,12 @@ const Home = ({ session }) => {
                     <Button onClick={() => wearableIntegrationAction('Fitbit')} className="bg-teal-500 hover:bg-teal-600 text-white w-full">Collega Fitbit</Button>
                     <Button onClick={() => wearableIntegrationAction('Altro Dispositivo')} className="bg-gray-500 hover:bg-gray-600 text-white w-full">Collega Altro</Button>
                   </div>
-                  <Button onClick={() => syncWearableDataAction('Wearable Sim')} variant="outline" className="w-full border-dashed border-sky-500 text-sky-600 hover:bg-sky-50">
-                    Simula Sincronizzazione Dati Wearable
+                  <Button onClick={() => syncWearableDataAction('Wearable WebBT')} variant="outline" className="w-full border-dashed border-sky-500 text-sky-600 hover:bg-sky-50">
+                    Sincronizza Dati Wearable
                   </Button>
                   {userBiometricData.length > 0 && (
                     <div className="pt-4">
-                      <h3 className="text-md font-semibold mb-2 text-gray-700">Ultimi Dati Biometrici (Simulati):</h3>
+                      <h3 className="text-md font-semibold mb-2 text-gray-700">Ultimi Dati Biometrici:</h3>
                       <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 text-xs">
                         {userBiometricData.slice(0,3).map(data => (
                           <div key={data.recorded_at + data.data_type} className="p-2 border rounded-md bg-slate-50">
